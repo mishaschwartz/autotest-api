@@ -4,14 +4,16 @@ WORKDIR /app
 
 COPY requirements.txt requirements.txt
 
-RUN pip3 install -r requirements.txt
+RUN python -m pip install -r requirements.txt && rm requirements.txt
 
 FROM base as dev
 
-CMD python3 run.py
+CMD python run.py
 
 FROM base as prod
 
+RUN python -m pip install gunicorn
+
 COPY . .
 
-CMD gunicorn --bind 0.0.0.0:5000 run:app
+CMD python -m gunicorn --bind 0.0.0.0:5000 run:app

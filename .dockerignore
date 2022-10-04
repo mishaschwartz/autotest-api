@@ -7,3 +7,4 @@
 **/.eggs/
 venv/
 build/
+.git/
