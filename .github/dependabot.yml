@@ -1,10 +1,6 @@
 version: 2
 updates:
   - package-ecosystem: pip
-    directory: "/client"
-    schedule:
-      interval: "monthly"
-  - package-ecosystem: pip
-    directory: "/server"
+    directory: "/"
     schedule:
       interval: "monthly"

@@ -1,37 +1,14 @@
 version: '3.7'
 
 services:
-  server:
+  api:
     build:
-      context: ./server
-      dockerfile: ./.dockerfiles/Dockerfile
-      args:
-        UBUNTU_VERSION: '20.04'
-        LOGIN_USER: 'docker'
-        WORKSPACE: '/home/docker/.autotesting'
-    image: markus-autotest-server-dev:1.1.0
+      dockerfile: ./Dockerfile
+      target: dev
+    image: markus-autotest-api-dev:1.0.0
+    container_name: 'autotest-api'
     volumes:
-      - ./server:/app:cached
-      - workspace:/home/docker/.autotesting:rw
-    environment:
-      - REDIS_URL=redis://redis:6379/
-      - WORKSPACE=/home/docker/.autotesting
-      - SUPERVISOR_URL=127.0.0.1:9001
-      - AUTOTESTER_CONFIG=/app/.dockerfiles/docker-config.yml
-    depends_on:
-      - postgres
-      - redis
-
-  client:
-    build:
-      context: ./client
-      dockerfile: ./.dockerfiles/Dockerfile
-      args:
-        UBUNTU_VERSION: '20.04'
-    image: markus-autotest-client-dev:1.1.0
-    container_name: 'autotest-client'
-    volumes:
-      - ./client:/app:cached
+      - .:/app:cached
     environment:
       - REDIS_URL=redis://redis:6379/
       - FLASK_HOST=0.0.0.0
@@ -39,20 +16,9 @@ services:
       - '5000:5000'
     depends_on:
       - redis
-      - server
     networks:
       - default
       - markus_dev
-
-  postgres:
-    image: postgres:10
-    volumes:
-      - postgres_autotest:/var/lib/postgresql/data
-    environment:
-      - PSQL_HISTFILE=/root/log/.psql_history
-      - POSTGRES_HOST_AUTH_METHOD=trust
-    ports:
-      - '45432:5432'
 
   redis:
     image: redis:3.2-alpine
@@ -71,11 +37,8 @@ services:
       - redis
 
 volumes:
-  postgres_autotest:
   redis_autotest:
-  workspace:
 
 networks:
   markus_dev:
-    external:
-      name: markus_dev
+    name: markus_dev

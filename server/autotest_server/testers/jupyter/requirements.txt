@@ -1,3 +1,0 @@
-pytest==7.1.2
-psycopg2-binary==2.9.3
-git+https://github.com/MarkUsProject/autotest-helpers.git#subdirectory=notebook_helper

@@ -1,4 +1,4 @@
-import autotest_client
+import autotest_api
 import pytest
 import fakeredis
 import json
@@ -6,8 +6,8 @@ import json
 
 @pytest.fixture
 def client():
-    autotest_client.app.config["TESTING"] = True
-    with autotest_client.app.test_client() as client:
+    autotest_api.app.config["TESTING"] = True
+    with autotest_api.app.test_client() as client:
         yield client
 
 
@@ -19,12 +19,12 @@ def fake_redis_conn():
 @pytest.fixture
 def fake_rq_conn():
     conn = fakeredis.FakeStrictRedis(decode_responses=False)
-    autotest_client.rq.use_connection(conn)
+    autotest_api.rq.use_connection(conn)
 
 
 @pytest.fixture(autouse=True)
 def fake_redis_db(monkeypatch, fake_redis_conn):
-    monkeypatch.setattr(autotest_client.redis.Redis, "from_url", lambda *a, **kw: fake_redis_conn)
+    monkeypatch.setattr(autotest_api.redis.Redis, "from_url", lambda *a, **kw: fake_redis_conn)
 
 
 class TestRegister:

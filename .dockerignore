@@ -1,7 +1,9 @@
-**/.DS_Store
-.git/
+.idea/
+**/.DS_Store/
+**/__pycache__/
+**/.hypothesis/
+**/.pytest_cache/
+**/*.egg-info/
+**/.eggs/
 venv/
-.eggs/
-**/.pytest_cache
-**/*.egg-info
-.installed
+build/

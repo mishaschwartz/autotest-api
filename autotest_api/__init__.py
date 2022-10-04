@@ -112,6 +112,10 @@ def _authorize_tests(tests_id=None, settings_id=None, **_kw):
 
 
 def _update_settings(settings_id, user):
+    job_id = f"settings_{settings_id}"
+    if (job := rq.Job.fetch(job_id, connection=_rq_connection())) and job.get_status() in ("queued", "started"):
+        msg = "Settings are currently being updated. Please try again in a few minutes."
+        abort(make_response(jsonify(message=msg), 409))
     test_settings = request.json.get("settings") or {}
     file_url = request.json.get("file_url")
     test_files = request.json.get("files") or []
@@ -130,21 +134,17 @@ def _update_settings(settings_id, user):
     queue.enqueue_call(
         "autotest_server.update_test_settings",
         kwargs=data,
-        job_id=f"settings_{settings_id}",
+        job_id=job_id,
         timeout=SETTINGS_JOB_TIMEOUT,
     )
 
 
 def _get_jobs(test_ids, settings_id):
-    for id_ in test_ids:
-        test_setting = _redis_connection().hget("autotest:tests", id_)
-        if test_setting is None or test_setting != settings_id:
-            yield None
+    for id_, job in zip(test_ids, rq.Job.fetch_many(test_ids, connection=_rq_connection())):
+        if job is None or _redis_connection().hget("autotest:tests", id_) != settings_id:
+            yield id_, None
         else:
-            try:
-                yield rq.job.Job.fetch(str(id_), connection=_rq_connection())
-            except rq.exceptions.NoSuchJobError:
-                yield None
+            yield id_, job
 
 
 def authorize(func):
@@ -172,6 +172,23 @@ def authorize(func):
         return func(*args, **kwargs, user=user)
 
     return _f
+
+
+def _filter_private_keys(dictionary):
+    if isinstance(dictionary, dict):
+        return {k: _filter_private_keys(v) for k, v in dictionary.items() if not k.startswith("_")}
+    else:
+        return dictionary
+
+
+def get_settings(settings_id, show_hidden=False):
+    settings_ = json.loads(_redis_connection().hget("autotest:settings", key=settings_id) or "{}")
+    if settings_.get("_error"):
+        raise Exception(f"Settings Error: {settings_['_error']}")
+    if show_hidden:
+        return settings_
+    else:
+        return _filter_private_keys(settings_)
 
 
 @app.route("/register", methods=["POST"])
@@ -205,10 +222,7 @@ def schema(**_kwargs):
 @app.route("/settings/<settings_id>", methods=["GET"])
 @authorize
 def settings(settings_id, **_kw):
-    settings_ = json.loads(_redis_connection().hget("autotest:settings", key=settings_id) or "{}")
-    if settings_.get("_error"):
-        raise Exception(f"Settings Error: {settings_['_error']}")
-    return {k: v for k, v in settings_.items() if not k.startswith("_")}
+    return get_settings(settings_id)
 
 
 @app.route("/settings", methods=["POST"])
@@ -238,9 +252,10 @@ def run_tests(settings_id, user):
 
     timeout = 0
 
-    for settings_ in settings(settings_id)["testers"]:
+    for settings_ in get_settings(settings_id, show_hidden=True)["testers"]:
         for data in settings_["test_data"]:
-            timeout += data["timeout"]
+            if set(data["categories"]) & set(categories):
+                timeout += data["timeout"]
 
     ids = []
     for data in test_data:
@@ -304,7 +319,7 @@ def get_feedback_file(settings_id, tests_id, feedback_id, **_kw):
 def get_statuses(settings_id, **_kw):
     test_ids = request.json["test_ids"]
     result = {}
-    for id_, job in zip(test_ids, _get_jobs(test_ids, settings_id)):
+    for id_, job in _get_jobs(test_ids, settings_id):
         result[id_] = job if job is None else job.get_status()
     return result
 
@@ -313,7 +328,7 @@ def get_statuses(settings_id, **_kw):
 @authorize
 def cancel_tests(settings_id, **_kw):
     test_ids = request.json["test_ids"]
-    result = {}
-    for id_, job in zip(test_ids, _get_jobs(test_ids, settings_id)):
-        result[id_] = job if job is None else job.cancel()
+    for _, job in _get_jobs(test_ids, settings_id):
+        if job is not None:
+            job.cancel()
     return jsonify(success=True)

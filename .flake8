@@ -5,7 +5,7 @@ ignore = E266, BLK100
 exclude =
     .git,
     .idea,
-    __pycache__.
+    __pycache__,
     .DS_Store,
     .hypothesis,
     .pytest_cache,
