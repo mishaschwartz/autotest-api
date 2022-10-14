@@ -1,3 +1,5 @@
+""" This module contains helpers to validate json against a given schema """
+
 from jsonschema import Draft7Validator, validators, ValidationError
 from jsonschema.exceptions import best_match
 from copy import deepcopy

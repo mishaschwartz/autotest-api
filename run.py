@@ -1,3 +1,5 @@
+""" CLI for running the app in development """
+
 import os
 from autotest_api import app
 
