@@ -13,18 +13,12 @@ def client():
 
 @pytest.fixture
 def fake_redis_conn():
-    yield fakeredis.FakeStrictRedis(decode_responses=True)
-
-
-@pytest.fixture
-def fake_rq_conn():
-    conn = fakeredis.FakeStrictRedis(decode_responses=False)
-    autotest_api.rq.use_connection(conn)
+    yield fakeredis.FakeStrictRedis()
 
 
 @pytest.fixture(autouse=True)
 def fake_redis_db(monkeypatch, fake_redis_conn):
-    monkeypatch.setattr(autotest_api.redis.Redis, "from_url", lambda *a, **kw: fake_redis_conn)
+    monkeypatch.setattr(autotest_api, "REDIS_CONNECTION", fake_redis_conn)
 
 
 class TestRegister:

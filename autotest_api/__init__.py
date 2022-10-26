@@ -32,6 +32,8 @@ app = Flask(__name__)
 
 ID_TYPE = Union[int, str]
 
+REDIS_CONNECTION = redis.Redis.from_url(REDIS_URL)
+
 
 @contextmanager
 def _open_log(log: str, mode: str = "a", fallback: IO = sys.stdout) -> IO:
@@ -44,30 +46,6 @@ def _open_log(log: str, mode: str = "a", fallback: IO = sys.stdout) -> IO:
             yield f
     else:
         yield fallback
-
-
-def _redis_connection(**kwargs) -> redis.Redis:
-    """
-    Return a connection to the redis database at REDIS_URL.
-
-    Passes kwargs on to the redis.Redis.from_url function except that the
-    default for the decode_responses kwarg is True instead of False.
-    """
-    kwargs["decode_responses"] = kwargs.get("decode_responses", True)
-    return redis.Redis.from_url(REDIS_URL, **kwargs)
-
-
-def _rq_connection() -> redis.Redis:
-    """
-    Return the currently open redis connection object. If there is no
-    connection currently open, one is created using the url specified in
-    REDIS_URL.
-    """
-    conn = rq.get_current_connection()
-    if conn:
-        return conn
-    rq.use_connection(redis=redis.Redis.from_url(REDIS_URL))
-    return rq.get_current_connection()
 
 
 @app.errorhandler(Exception)
@@ -96,16 +74,15 @@ def _check_rate_limit(api_key: str) -> None:
     The limit is set for each user in the redis database. If no limit is set for a given
     user, the user will not be limited in the number of requests they can make per minute.
     """
-    conn = _redis_connection()
     key = f"autotest:ratelimit:{api_key}:{datetime.now().minute}"
-    n_requests = conn.get(key) or 0
-    user_limit = conn.get(f"autotest:ratelimit:{api_key}:limit")
+    n_requests = REDIS_CONNECTION.get(key) or 0
+    user_limit = REDIS_CONNECTION.get(f"autotest:ratelimit:{api_key}:limit") or 20  # TODO: make default configurable
     if user_limit is None:
         return
     if int(n_requests) > int(user_limit):
         abort(make_response(jsonify(message="Too many requests"), 429))
     else:
-        with conn.pipeline() as pipe:
+        with REDIS_CONNECTION.pipeline() as pipe:
             pipe.incr(key)
             pipe.expire(key, 59)
             pipe.execute()
@@ -117,8 +94,7 @@ def _authorize_user() -> str:
     api key if the user exists.
     """
     api_key = request.headers.get("Api-Key")
-    user_name = (_redis_connection().hgetall("autotest:user_credentials") or {}).get(api_key)
-    if user_name is None:
+    if api_key is None or (REDIS_CONNECTION.hgetall("autotest:user_credentials") or {}).get(api_key.encode()) is None:
         abort(make_response(jsonify(message="Unauthorized"), 401))
     _check_rate_limit(api_key)
     return api_key
@@ -131,7 +107,7 @@ def _authorize_settings(user: str, settings_id: Optional[ID_TYPE] = None, **_kw)
     This function is a no-op if settings_id is None.
     """
     if settings_id:
-        settings_ = _redis_connection().hget("autotest:settings", settings_id)
+        settings_ = REDIS_CONNECTION.hget("autotest:settings", settings_id)
         if settings_ is None:
             abort(make_response(jsonify(message="Settings not found"), 404))
         if json.loads(settings_).get("_user") != user:
@@ -145,10 +121,10 @@ def _authorize_tests(tests_id: Optional[ID_TYPE] = None, settings_id: Optional[I
     This function is a no-op if either settings_id or tests_id is None.
     """
     if settings_id and tests_id:
-        test_setting = _redis_connection().hget("autotest:tests", tests_id)
+        test_setting = REDIS_CONNECTION.hget("autotest:tests", tests_id)
         if test_setting is None:
             abort(make_response(jsonify(message="Test not found"), 404))
-        if test_setting != settings_id:
+        if int(test_setting) != int(settings_id):
             abort(make_response(jsonify(message="Unauthorized"), 401))
 
 
@@ -167,7 +143,7 @@ def _update_settings(settings_id: ID_TYPE, user: str) -> None:
                    before the files are actually downloaded from the given URL
     """
     job_id = f"settings_{settings_id}"
-    if (job := rq.job.Job.fetch(job_id, connection=_rq_connection())) and job.get_status() in ("queued", "started"):
+    if (job := rq.job.Job.fetch(job_id, connection=REDIS_CONNECTION)) and job.get_status() in ("queued", "started"):
         msg = "Settings are currently being updated. Please try again in a few minutes."
         abort(make_response(jsonify(message=msg), 409))
     test_settings = request.json.get("settings") or {}
@@ -183,7 +159,7 @@ def _update_settings(settings_id: ID_TYPE, user: str) -> None:
     if error:
         abort(make_response(jsonify(message=error), 422))
 
-    queue = rq.Queue("settings", connection=_rq_connection())
+    queue = rq.Queue("settings", connection=REDIS_CONNECTION)
     data = {"user": user, "settings_id": settings_id, "test_settings": test_settings, "file_url": file_url}
     queue.enqueue_call(
         "autotest_server.update_test_settings",
@@ -198,8 +174,8 @@ def _get_jobs(test_ids: Sequence[ID_TYPE], settings_id: ID_TYPE) -> Iterable[Tup
     Yield each test_id and an associated rq Job that is responsible for running the test.
     If there is no associated job, yield the test_id and None instead.
     """
-    for id_, job in zip(test_ids, rq.job.Job.fetch_many(test_ids, connection=_rq_connection())):
-        if job is None or _redis_connection().hget("autotest:tests", id_) != settings_id:
+    for id_, job in zip(test_ids, rq.job.Job.fetch_many(test_ids, connection=REDIS_CONNECTION)):
+        if job is None or int(REDIS_CONNECTION.hget("autotest:tests", id_)) != int(settings_id):
             yield id_, None
         else:
             yield id_, job
@@ -256,7 +232,7 @@ def get_settings(settings_id: ID_TYPE, show_hidden: bool = False) -> Dict:
 
     If show_hidden is false, filter out all hidden keys (those that start with "_").
     """
-    settings_ = json.loads(_redis_connection().hget("autotest:settings", key=settings_id) or "{}")
+    settings_ = json.loads(REDIS_CONNECTION.hget("autotest:settings", key=settings_id) or "{}")
     if settings_.get("_error"):
         raise Exception(f"Settings Error: {settings_['_error']}")
     if show_hidden:
@@ -275,7 +251,7 @@ def register() -> Dict:
     credentials = request.json.get("credentials")
     key = base64.b64encode(os.urandom(24)).decode("utf-8")
     data = {"auth_type": auth_type, "credentials": credentials}
-    while not _redis_connection().hsetnx("autotest:user_credentials", key=key, value=json.dumps(data)):
+    while not REDIS_CONNECTION.hsetnx("autotest:user_credentials", key=key, value=json.dumps(data)):
         key = base64.b64encode(os.urandom(24)).decode("utf-8")
     return {"api_key": key}
 
@@ -289,7 +265,7 @@ def reset_credentials(user: str) -> Response:
     auth_type = request.json.get("auth_type")
     credentials = request.json.get("credentials")
     data = {"auth_type": auth_type, "credentials": credentials}
-    _redis_connection().hset("autotest:user_credentials", key=user, value=json.dumps(data))
+    REDIS_CONNECTION.hset("autotest:user_credentials", key=user, value=json.dumps(data))
     return jsonify(success=True)
 
 
@@ -299,7 +275,7 @@ def schema(**_kwargs) -> Dict:
     """
     Return the schema stored in the redis database
     """
-    return json.loads(_redis_connection().get("autotest:schema") or "{}")
+    return json.loads(REDIS_CONNECTION.get("autotest:schema") or "{}")
 
 
 @app.route("/settings/<settings_id>", methods=["GET"])
@@ -319,8 +295,8 @@ def create_settings(user: str) -> Dict:
 
     See _update_settings for more details
     """
-    settings_id = _redis_connection().incr("autotest:settings_id")
-    _redis_connection().hset("autotest:settings", key=settings_id, value=json.dumps({"_user": user}))
+    settings_id = REDIS_CONNECTION.incr("autotest:settings_id")
+    REDIS_CONNECTION.hset("autotest:settings", key=settings_id, value=json.dumps({"_user": user}))
     _update_settings(settings_id, user)
     return {"settings_id": settings_id}
 
@@ -356,7 +332,7 @@ def run_tests(settings_id: ID_TYPE, user: str) -> Dict:
     categories = request.json["categories"]
     high_priority = request.json.get("request_high_priority")
     queue_name = "batch" if len(test_data) > 1 else ("high" if high_priority else "low")
-    queue = rq.Queue(queue_name, connection=_rq_connection())
+    queue = rq.Queue(queue_name, connection=REDIS_CONNECTION)
 
     timeout = 0
 
@@ -369,8 +345,8 @@ def run_tests(settings_id: ID_TYPE, user: str) -> Dict:
     for data in test_data:
         url = data["file_url"]
         test_env_vars = data.get("env_vars", {})
-        id_ = _redis_connection().incr("autotest:tests_id")
-        _redis_connection().hset("autotest:tests", key=id_, value=settings_id)
+        id_ = REDIS_CONNECTION.incr("autotest:tests_id")
+        REDIS_CONNECTION.hset("autotest:tests", key=id_, value=settings_id)
         ids.append(id_)
         data = {
             "settings_id": settings_id,
@@ -398,11 +374,11 @@ def get_result(settings_id: ID_TYPE, tests_id: ID_TYPE, **_kw) -> Dict:
     """
     Return the result for the test with id tests_id
     """
-    job = rq.job.Job.fetch(tests_id, connection=_rq_connection())
+    job = rq.job.Job.fetch(tests_id, connection=REDIS_CONNECTION)
     job_status = job.get_status()
     result = {"status": job_status}
     if job_status == "finished":
-        test_result = _redis_connection().get(f"autotest:test_result:{tests_id}")
+        test_result = REDIS_CONNECTION.get(f"autotest:test_result:{tests_id}")
         try:
             result.update(json.loads(test_result))
         except json.JSONDecodeError:
@@ -410,7 +386,7 @@ def get_result(settings_id: ID_TYPE, tests_id: ID_TYPE, **_kw) -> Dict:
     elif job_status == "failed":
         result.update({"error": str(job.exc_info)})
     job.delete()
-    _redis_connection().delete(f"autotest:test_result:{tests_id}")
+    REDIS_CONNECTION.delete(f"autotest:test_result:{tests_id}")
     return result
 
 
@@ -421,10 +397,10 @@ def get_feedback_file(settings_id: ID_TYPE, tests_id: ID_TYPE, feedback_id: ID_T
     Return the feedback file with id == feedback_id (in a response)
     """
     key = f"autotest:feedback_file:{tests_id}:{feedback_id}"
-    data = _redis_connection(decode_responses=False).get(key)
+    data = REDIS_CONNECTION.get(key)
     if data is None:
         abort(make_response(jsonify(message="File doesn't exist"), 404))
-    _redis_connection().delete(key)
+    REDIS_CONNECTION.delete(key)
     return send_file(io.BytesIO(data), mimetype="application/gzip", as_attachment=True, download_name=str(feedback_id))
 
 
