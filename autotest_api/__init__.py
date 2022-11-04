@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from flask import Flask, request, jsonify, abort, make_response, send_file, Response
 from werkzeug.exceptions import HTTPException
 from typing import IO, Tuple, Optional, Union, Sequence, Iterable, Callable, Any, Dict
+from rq.exceptions import NoSuchJobError
 
 from . import form_management
 
@@ -128,6 +129,16 @@ def _authorize_tests(tests_id: Optional[ID_TYPE] = None, settings_id: Optional[I
             abort(make_response(jsonify(message="Unauthorized"), 401))
 
 
+def _check_settings_updating(settings_job_id):
+    try:
+        current_job = rq.job.Job.fetch(settings_job_id, connection=REDIS_CONNECTION)
+        if current_job.get_status() in ("queued", "started"):
+            msg = "Settings are currently being updated. Please try again in a few minutes."
+            abort(make_response(jsonify(message=msg), 409))
+    except NoSuchJobError:
+        pass
+
+
 def _update_settings(settings_id: ID_TYPE, user: str) -> None:
     """
     Enqueue a job to update the test settings and environment for the settings with id settings_id.
@@ -143,9 +154,7 @@ def _update_settings(settings_id: ID_TYPE, user: str) -> None:
                    before the files are actually downloaded from the given URL
     """
     job_id = f"settings_{settings_id}"
-    if (job := rq.job.Job.fetch(job_id, connection=REDIS_CONNECTION)) and job.get_status() in ("queued", "started"):
-        msg = "Settings are currently being updated. Please try again in a few minutes."
-        abort(make_response(jsonify(message=msg), 409))
+    _check_settings_updating(job_id)
     test_settings = request.json.get("settings") or {}
     file_url = request.json.get("file_url")
     test_files = request.json.get("files") or []
@@ -162,7 +171,7 @@ def _update_settings(settings_id: ID_TYPE, user: str) -> None:
     queue = rq.Queue("settings", connection=REDIS_CONNECTION)
     data = {"user": user, "settings_id": settings_id, "test_settings": test_settings, "file_url": file_url}
     queue.enqueue_call(
-        "autotest_server.update_test_settings",
+        "autotest_backend.update_test_settings",
         kwargs=data,
         job_id=job_id,
         timeout=SETTINGS_JOB_TIMEOUT,
@@ -174,7 +183,7 @@ def _get_jobs(test_ids: Sequence[ID_TYPE], settings_id: ID_TYPE) -> Iterable[Tup
     Yield each test_id and an associated rq Job that is responsible for running the test.
     If there is no associated job, yield the test_id and None instead.
     """
-    for id_, job in zip(test_ids, rq.job.Job.fetch_many(test_ids, connection=REDIS_CONNECTION)):
+    for id_, job in zip(test_ids, rq.job.Job.fetch_many([str(id_) for id_ in test_ids], connection=REDIS_CONNECTION)):
         if job is None or int(REDIS_CONNECTION.hget("autotest:tests", id_)) != int(settings_id):
             yield id_, None
         else:
@@ -328,6 +337,7 @@ def run_tests(settings_id: ID_TYPE, user: str) -> Dict:
     - request_high_priority: a boolean indicating whether these tests should be run in a higher priority queue
                              (this is ignored if more than one test is sent at the same time)
     """
+    _check_settings_updating(f"settings_{settings_id}")
     test_data = request.json["test_data"]
     categories = request.json["categories"]
     high_priority = request.json.get("request_high_priority")
@@ -336,10 +346,13 @@ def run_tests(settings_id: ID_TYPE, user: str) -> Dict:
 
     timeout = 0
 
-    for settings_ in get_settings(settings_id, show_hidden=True)["testers"]:
-        for data in settings_["test_data"]:
-            if set(data["categories"]) & set(categories):
-                timeout += data["timeout"]
+    try:
+        for settings_ in get_settings(settings_id, show_hidden=True)["testers"]:
+            for data in settings_["test_data"]:
+                if set(data["categories"]) & set(categories):
+                    timeout += data["timeout"]
+    except KeyError:
+        abort(make_response(jsonify(message="Settings are malformed, please update them and try again."), 409))
 
     ids = []
     for data in test_data:
@@ -357,7 +370,7 @@ def run_tests(settings_id: ID_TYPE, user: str) -> Dict:
             "test_env_vars": test_env_vars,
         }
         queue.enqueue_call(
-            "autotest_server.run_test",
+            "autotest_backend.run_test",
             kwargs=data,
             job_id=str(id_),
             timeout=int(timeout * 1.5),
